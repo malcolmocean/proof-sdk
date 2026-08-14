@@ -166,6 +166,8 @@ import {
 import { initSessionManager, getSessionManager } from '../agent/session-manager';
 import { getTriggerService } from '../agent/trigger-service';
 import { extractEmbeddedProvenance } from '../formats/provenance-sidecar';
+import { getBlindReviewState, setBlindReviewState } from '../shared/blind-review';
+import { initBlindReviewBanner } from '../ui/blind-review-banner';
 import type { CommentSelector, Comment } from '../formats/provenance-sidecar';
 import { normalizeQuote, extractMarks, embedMarks, getThread, migrateProvenanceToMarks, type OrchestratedMarkMeta } from '../formats/marks';
 import { proofMarkHandler } from '../formats/remark-proof-marks';
@@ -1129,8 +1131,22 @@ class ProofEditorImpl implements ProofEditor {
 
   constructor() {
     const proofConfig = (window as Window & {
-      __PROOF_CONFIG__?: { windowId?: string; documentId?: string };
+      __PROOF_CONFIG__?: {
+        windowId?: string;
+        documentId?: string;
+        blindMode?: boolean;
+        blindRevealedAt?: string | null;
+        blindIsOwner?: boolean;
+      };
     }).__PROOF_CONFIG__ ?? {};
+
+    if (proofConfig.blindMode) {
+      setBlindReviewState({
+        blindMode: true,
+        revealedAt: proofConfig.blindRevealedAt ?? null,
+        isOwner: proofConfig.blindIsOwner === true,
+      });
+    }
 
     if (!proofConfig.windowId) {
       proofConfig.windowId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1270,6 +1286,13 @@ class ProofEditorImpl implements ProofEditor {
     // Theme picker only applies to regular editor mode.
     if (!this.isShareMode) {
       initThemePicker();
+    }
+
+    if (getBlindReviewState().blindMode) {
+      initBlindReviewBanner({
+        getSlug: () => shareClient.getSlug(),
+        getAuthHeaders: () => shareClient.getShareAuthHeaders(),
+      });
     }
 
     // If in CLI mode, load the file from the API

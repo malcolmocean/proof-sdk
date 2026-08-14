@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import {
   noteDocumentLiveCollabLease,
   canMutateByOwnerIdentity,
+  getDocumentAuthStateBySlug,
   resolveDocumentAccessRole,
   upsertActiveCollabConnection,
 } from './db.js';
@@ -167,10 +168,15 @@ function buildLiveViewerLeaseConnectionId(
 
 function buildShareRuntimeConfigScript(slug: string, shareToken?: string | null): string {
   const commentUiDefaultMode = normalizeCommentUiMode(process.env.PROOF_COMMENT_UI_DEFAULT_MODE);
+  const blindState = getDocumentAuthStateBySlug(slug);
+  const blindIsOwner = Boolean(blindState && shareToken && canMutateByOwnerIdentity(blindState, shareToken));
   const configLines = [
     shareToken ? `window.__PROOF_CONFIG__.shareSlug = ${JSON.stringify(slug)};` : '',
     shareToken ? `window.__PROOF_CONFIG__.shareToken = ${JSON.stringify(shareToken)};` : '',
     commentUiDefaultMode ? `window.__PROOF_CONFIG__.commentUiDefaultMode = ${JSON.stringify(commentUiDefaultMode)};` : '',
+    blindState?.blind_mode ? `window.__PROOF_CONFIG__.blindMode = true;` : '',
+    blindState?.blind_mode ? `window.__PROOF_CONFIG__.blindRevealedAt = ${JSON.stringify(blindState.revealed_at ?? null)};` : '',
+    blindState?.blind_mode ? `window.__PROOF_CONFIG__.blindIsOwner = ${JSON.stringify(blindIsOwner)};` : '',
   ].filter(Boolean);
   if (configLines.length === 0) return '';
   return `<script>

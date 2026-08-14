@@ -15,6 +15,8 @@ import type { Node as ProseMirrorNode, MarkType } from '@milkdown/kit/prose/mode
 import { ySyncPluginKey } from 'y-prosemirror';
 import { buildTextIndex, getTextForRange, mapTextOffsetsToRange, resolveQuoteRange } from '../utils/text-range';
 import { SHARE_CONTENT_FILTER_ALLOW_META } from './share-content-filter';
+import { isMarkHiddenByBlindReview } from '../../shared/blind-review.js';
+import { getCurrentActor } from '../actor.js';
 
 import {
   type Mark,
@@ -1195,7 +1197,14 @@ function buildAnchorMarks(
     });
   }
 
-  return [...marks, ...authored];
+  // Blind review mode: hide other reviewers' marks at render time until the
+  // reveal. The metadata map is left untouched so local writes still merge
+  // (and never delete) hidden marks.
+  const visibleMarks = marks.filter(
+    (mark) => !isMarkHiddenByBlindReview(mark.kind, mark.by, getCurrentActor()),
+  );
+
+  return [...visibleMarks, ...authored];
 }
 
 function isMatchingAnchorMark(mark: Mark, nodeMark: { type: MarkType; attrs: Record<string, unknown> }): boolean {

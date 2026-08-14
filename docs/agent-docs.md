@@ -309,6 +309,16 @@ Ack processed events (editor/owner):
   POST /documents/<slug>/events/ack
   Body: {"upToId": <cursor>, "by": "ai:your-agent"}
 
+## Blind Review Mode
+
+Documents created with `{"blindMode": true}` run an independent review: until
+the owner calls `POST /api/documents/<slug>/reveal`, you only see your own
+comments/suggestions — send a consistent `by` (or `X-Agent-Id`) on every call
+so your own marks come back to you. State reads include `blindMode` and
+`revealedAt`. Don't infer that a blind document has no other feedback: other
+reviewers' marks exist but are withheld until the reveal. Full contract:
+`AGENT_CONTRACT.md` → "Blind Review Mode".
+
 ## Archived Desktop Workflow
 
 This repo is web-first. Desktop-native workflows are outside the public SDK scope and should be treated as separate implementation work.

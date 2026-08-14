@@ -28,8 +28,11 @@ import {
   createDocumentAccessToken,
   deleteDocument,
   getDocument,
+  getDocumentAuthStateBySlug,
   getDocumentBySlug,
   getStoredIdempotencyRecord,
+  revealDocumentComments,
+  setDocumentBlindMode,
   pauseDocument,
   resolveDocumentAccess,
   resolveDocumentAccessRole,
@@ -82,6 +85,12 @@ import {
   resolveDocumentOpRoute,
 } from './document-ops.js';
 import { validateRewriteApplyPayload } from './rewrite-validation.js';
+import {
+  type BlindViewer,
+  filterMarksForViewer,
+  isBlindActive,
+  preserveHiddenMarks,
+} from './blind-mode.js';
 import { adaptMutationResponse } from './mutation-coordinator.js';
 import {
   annotateRewriteDisruptionMetadata,
@@ -699,6 +708,16 @@ function getAccessRole(req: Request, slug: string): ShareRole | null {
   return 'editor';
 }
 
+function blindViewerFromRequest(req: Request, isOwner: boolean, fallbackActor?: string | null): BlindViewer {
+  const headerActor = req.header('x-agent-id');
+  const queryActor = typeof req.query.actor === 'string' ? req.query.actor : null;
+  const body = (req.body ?? {}) as { actor?: unknown; by?: unknown };
+  const bodyActor = typeof body.actor === 'string'
+    ? body.actor
+    : (typeof body.by === 'string' ? body.by : null);
+  return { actor: queryActor ?? headerActor ?? bodyActor ?? fallbackActor ?? null, isOwner };
+}
+
 function canOwnerMutate(req: Request, doc: { owner_secret: string | null; owner_secret_hash: string | null; owner_id: string | null }): boolean {
   return canMutateByOwnerIdentity(doc, getExplicitShareSecret(req));
 }
@@ -799,7 +818,7 @@ apiRoutes.post('/documents', (req: Request, res: Response) => {
     recordLegacyCreateRouteTelemetry(req, legacyCreateMode, 'allowed');
   }
 
-  const { markdown, marks, title, ownerId } = req.body;
+  const { markdown, marks, title, ownerId, blindMode } = req.body;
 
   if (typeof markdown !== 'string') {
     res.status(400).json({
@@ -826,7 +845,7 @@ apiRoutes.post('/documents', (req: Request, res: Response) => {
   const slug = generateSlug();
   const ownerSecret = randomUUID();
   const normalizedMarks = canonicalizeStoredMarks(marks ?? {});
-  const doc = createDocument(slug, sanitizedMarkdown, normalizedMarks, title, ownerId, ownerSecret);
+  const doc = createDocument(slug, sanitizedMarkdown, normalizedMarks, title, ownerId, ownerSecret, blindMode === true);
   const defaultAccess = createDocumentAccessToken(slug, 'editor');
   const links = buildShareLink(req, doc.slug);
   const shareUrlWithToken = withShareToken(links.shareUrl, defaultAccess.secret);
@@ -1182,12 +1201,16 @@ apiRoutes.get('/documents/:slug', (req: Request, res: Response) => {
     return;
   }
 
+  const blindState = getDocumentAuthStateBySlug(slug);
+  const blindViewer = blindViewerFromRequest(req, ownerOverride);
   res.json({
     slug: doc.slug,
     docId: doc.doc_id,
     title: doc.title,
     markdown: doc.markdown,
-    marks: parseJson(doc.marks),
+    marks: filterMarksForViewer(parseJson(doc.marks) as Record<string, { kind?: string; by?: string }>, blindState, blindViewer),
+    blindMode: Boolean(blindState?.blind_mode),
+    revealedAt: blindState?.revealed_at ?? null,
     // Legacy compatibility for <=0.28 clients.
     active: doc.share_state === 'ACTIVE',
     shareState: doc.share_state,
@@ -1286,6 +1309,61 @@ apiRoutes.put('/documents/:slug/title', (req: Request, res: Response) => {
 });
 
 // Update document content + marks (from native app owner or web viewer)
+// Blind review mode: enable/disable pre-reveal comment hiding (owner only).
+apiRoutes.post('/documents/:slug/blind-mode', (req: Request, res: Response) => {
+  const slug = getSlugParam(req);
+  if (!slug) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  const doc = getDocumentBySlug(slug);
+  if (!doc || doc.share_state === 'DELETED') {
+    res.status(404).json({ error: 'Document not found' });
+    return;
+  }
+  if (!canOwnerMutate(req, doc)) {
+    res.status(403).json({ error: 'Only the document owner can change blind mode', code: 'OWNER_REQUIRED' });
+    return;
+  }
+  const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be a boolean', code: 'INVALID_BLIND_MODE' });
+    return;
+  }
+  setDocumentBlindMode(slug, enabled);
+  addDocumentEvent(slug, enabled ? 'blind_mode.enabled' : 'blind_mode.disabled', { by: 'owner' }, 'owner');
+  bumpDocumentAccessEpoch(slug);
+  broadcastToRoom(slug, { type: 'document.updated', slug, reason: 'blind_mode' });
+  res.json({ success: true, slug, blindMode: enabled, revealedAt: null });
+});
+
+// Blind review mode: flip the reveal switch so everyone sees all comments (owner only).
+apiRoutes.post('/documents/:slug/reveal', (req: Request, res: Response) => {
+  const slug = getSlugParam(req);
+  if (!slug) {
+    res.status(400).json({ error: 'Invalid slug' });
+    return;
+  }
+  const doc = getDocumentBySlug(slug);
+  if (!doc || doc.share_state === 'DELETED') {
+    res.status(404).json({ error: 'Document not found' });
+    return;
+  }
+  if (!canOwnerMutate(req, doc)) {
+    res.status(403).json({ error: 'Only the document owner can reveal comments', code: 'OWNER_REQUIRED' });
+    return;
+  }
+  if (!doc.blind_mode) {
+    res.status(409).json({ error: 'Document is not in blind mode', code: 'NOT_BLIND_MODE' });
+    return;
+  }
+  const revealedAt = doc.revealed_at ?? revealDocumentComments(slug);
+  addDocumentEvent(slug, 'comments.revealed', { by: 'owner', revealedAt }, 'owner');
+  bumpDocumentAccessEpoch(slug);
+  broadcastToRoom(slug, { type: 'document.updated', slug, reason: 'reveal' });
+  res.json({ success: true, slug, blindMode: true, revealedAt });
+});
+
 apiRoutes.put('/documents/:slug', async (req: Request, res: Response) => {
   const { markdown, marks, title, actor, clientId, ownerSecret, ownerId } = req.body;
   const slug = getSlugParam(req);
@@ -1334,7 +1412,17 @@ apiRoutes.put('/documents/:slug', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'marks must be an object when provided' });
     return;
   }
-  const normalizedMarks = hasMarksUpdate ? canonicalizeStoredMarks(marks as Record<string, unknown>) : undefined;
+  const submittedMarks = hasMarksUpdate ? canonicalizeStoredMarks(marks as Record<string, unknown>) : undefined;
+  // In blind mode a writer only sees its own review marks, so a full-map PUT
+  // must not silently delete or alter marks hidden from that writer.
+  const normalizedMarks = (hasMarksUpdate && submittedMarks)
+    ? preserveHiddenMarks(
+      submittedMarks as Record<string, { kind?: string; by?: string }>,
+      previousMarks as Record<string, { kind?: string; by?: string }> | null,
+      getDocumentAuthStateBySlug(slug),
+      blindViewerFromRequest(req, ownerOrBot, mutationActor),
+    ) as typeof submittedMarks
+    : submittedMarks;
   if (hasTitleUpdate && typeof title !== 'string') {
     res.status(400).json({ error: 'title must be a string when provided' });
     return;
@@ -1780,7 +1868,17 @@ apiRoutes.post('/documents/:slug/ops', opsRateLimiter, async (req: Request, res:
     });
   }
 
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  const opsResponseBody = (isRecord(result.body) && isRecord(result.body.marks))
+    ? {
+      ...result.body,
+      marks: filterMarksForViewer(
+        result.body.marks as Record<string, { kind?: string; by?: string }>,
+        getDocumentAuthStateBySlug(slug),
+        blindViewerFromRequest(req, ownerAuthorized),
+      ),
+    }
+    : result.body;
+  sendMutationResponse(res, result.status, opsResponseBody, { route: mutationRoute, slug });
 });
 
 // DELETE is an alias for destructive delete.

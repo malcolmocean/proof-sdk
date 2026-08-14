@@ -1,9 +1,16 @@
 import { createHash } from 'crypto';
 import { Router, type Request, type Response } from 'express';
 import {
+  type BlindViewer,
+  filterEventsForViewer,
+  filterMarksForViewer,
+  isBlindActive,
+} from './blind-mode.js';
+import {
   ackDocumentEvents,
   addDocumentEvent,
   bumpDocumentAccessEpoch,
+  getDocumentAuthStateBySlug,
   getDocumentBySlug,
   getDocumentProjectionBySlug,
   listDocumentEvents,
@@ -210,6 +217,32 @@ function getSlug(req: Request): string | null {
   if (typeof raw === 'string' && raw.trim()) return raw;
   if (Array.isArray(raw) && typeof raw[0] === 'string' && raw[0].trim()) return raw[0];
   return null;
+}
+
+/** Blind review mode: the viewer identity behind an agent-route request. */
+function blindViewerForAgentRequest(req: Request, slug: string): BlindViewer {
+  const secret = getPresentedSecret(req, slug);
+  const role = secret ? resolveDocumentAccessRole(slug, secret) : null;
+  const headerActor = req.header('x-agent-id');
+  const bodyActor = isRecord(req.body) && typeof req.body.by === 'string' ? req.body.by : null;
+  const queryActor = typeof req.query.actor === 'string' ? req.query.actor : null;
+  const actor = (typeof headerActor === 'string' && headerActor.trim()) ? headerActor.trim() : (bodyActor ?? queryActor);
+  return { actor: actor ?? null, isOwner: role === 'owner_bot' };
+}
+
+/** Filter a response body's marks map down to what this caller may see pre-reveal. */
+function applyBlindModeToAgentBody(req: Request, slug: string, body: unknown): unknown {
+  if (!isRecord(body) || !isRecord(body.marks)) return body;
+  const docState = getDocumentAuthStateBySlug(slug);
+  if (!isBlindActive(docState)) return body;
+  return {
+    ...body,
+    marks: filterMarksForViewer(
+      body.marks as Record<string, { kind?: string; by?: string }>,
+      docState,
+      blindViewerForAgentRequest(req, slug),
+    ),
+  };
 }
 
 function getPresentedSecret(req: Request, slug?: string | null): string | null {
@@ -1974,7 +2007,12 @@ agentRoutes.get('/:slug/state', async (req: Request, res: Response) => {
   ensureAgentPresenceForAuthenticatedCall(req, slug, {}, 'state.read');
   await recoverCanonicalDocumentIfNeeded(slug, 'state');
   const result = await executeDocumentOperationAsync(slug, 'GET', '/state');
-  const body = asPayload(result.body);
+  const body = asPayload(applyBlindModeToAgentBody(req, slug, result.body));
+  const blindDocState = getDocumentAuthStateBySlug(slug);
+  if (blindDocState?.blind_mode) {
+    body.blindMode = true;
+    body.revealedAt = blindDocState.revealed_at ?? null;
+  }
   const doc = getDocumentBySlug(slug);
   const mutationBase = await resolveRouteMutationBase(slug);
   if (mutationBase) {
@@ -2416,7 +2454,7 @@ agentRoutes.post('/:slug/edit/v2', async (req: Request, res: Response) => {
     releaseIdempotentMutationResult(replay, mutationRoute, slug, 'invalid_result_body');
   }
 
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 // Apply targeted edit operations (agent-friendly; no compatibility headers).
@@ -3390,7 +3428,7 @@ agentRoutes.post('/:slug/ops', async (req: Request, res: Response) => {
       { verify: false, apply: false },
     );
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/comment', async (req: Request, res: Response) => {
@@ -3412,7 +3450,7 @@ agentRoutes.post('/:slug/marks/comment', async (req: Request, res: Response) => 
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'comment.add' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/suggest-replace', async (req: Request, res: Response) => {
@@ -3434,7 +3472,7 @@ agentRoutes.post('/:slug/marks/suggest-replace', async (req: Request, res: Respo
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.add.replace' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/suggest-insert', async (req: Request, res: Response) => {
@@ -3456,7 +3494,7 @@ agentRoutes.post('/:slug/marks/suggest-insert', async (req: Request, res: Respon
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.add.insert' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/suggest-delete', async (req: Request, res: Response) => {
@@ -3478,7 +3516,7 @@ agentRoutes.post('/:slug/marks/suggest-delete', async (req: Request, res: Respon
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.add.delete' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
@@ -3547,7 +3585,7 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
     }
   }
   storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
@@ -3570,7 +3608,7 @@ agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.reject' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/reply', async (req: Request, res: Response) => {
@@ -3592,7 +3630,7 @@ agentRoutes.post('/:slug/marks/reply', async (req: Request, res: Response) => {
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'comment.reply' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/resolve', async (req: Request, res: Response) => {
@@ -3614,7 +3652,7 @@ agentRoutes.post('/:slug/marks/resolve', async (req: Request, res: Response) => 
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'comment.resolve' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/unresolve', async (req: Request, res: Response) => {
@@ -3636,7 +3674,7 @@ agentRoutes.post('/:slug/marks/unresolve', async (req: Request, res: Response) =
   if (result.status >= 200 && result.status < 300) {
     notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'comment.unresolve' }), { apply: false });
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/rewrite', async (req: Request, res: Response) => {
@@ -3911,7 +3949,11 @@ agentRoutes.get('/:slug/events/pending', (req: Request, res: Response) => {
   if (!checkAuth(req, res, slug, ['viewer', 'commenter', 'editor', 'owner_bot'])) return;
   const after = Number.parseInt(String(req.query.after ?? '0'), 10);
   const limit = Number.parseInt(String(req.query.limit ?? '100'), 10);
-  const events = listDocumentEvents(slug, Number.isFinite(after) ? Math.max(0, after) : 0, Number.isFinite(limit) ? limit : 100);
+  const allEvents = listDocumentEvents(slug, Number.isFinite(after) ? Math.max(0, after) : 0, Number.isFinite(limit) ? limit : 100);
+  // Blind review mode: comment/suggestion events carry mark contents, so
+  // pre-reveal each viewer only receives events for its own marks. The cursor
+  // still advances over hidden events.
+  const events = filterEventsForViewer(allEvents, getDocumentAuthStateBySlug(slug), blindViewerForAgentRequest(req, slug));
   const startedAtMs = getRequestStartedAtMs(res) ?? Date.now();
   const durationMs = Math.max(0, Date.now() - startedAtMs);
   recordCollabRouteLatency('events_pending', 'success', durationMs);
@@ -3950,7 +3992,7 @@ agentRoutes.get('/:slug/events/pending', (req: Request, res: Response) => {
       ackedAt: event.acked_at,
       ackedBy: event.acked_by,
     })),
-    cursor: events.length > 0 ? events[events.length - 1]?.id ?? after : after,
+    cursor: allEvents.length > 0 ? allEvents[allEvents.length - 1]?.id ?? after : after,
   });
 });
 
@@ -4003,7 +4045,7 @@ agentRoutes.use(async (req: Request, res: Response) => {
     );
   }
   if (routeRequiresMutation(method, path)) {
-    sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+    sendMutationResponse(res, result.status, applyBlindModeToAgentBody(req, slug, result.body), { route: mutationRoute, slug });
     return;
   }
   res.status(result.status).json(result.body);

@@ -236,6 +236,8 @@ export interface DocumentRow {
   owner_id: string | null;
   owner_secret: string | null;
   owner_secret_hash: string | null;
+  blind_mode: number;
+  revealed_at: string | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -272,6 +274,8 @@ export interface DocumentAuthStateRow {
   owner_id: string | null;
   owner_secret: string | null;
   owner_secret_hash: string | null;
+  blind_mode: number;
+  revealed_at: string | null;
 }
 
 export interface DocumentBlockRow {
@@ -699,6 +703,12 @@ function addMissingDocumentColumns(): void {
   if (!names.has('y_state_blob')) {
     d.exec('ALTER TABLE documents ADD COLUMN y_state_blob BLOB');
   }
+  if (!names.has('blind_mode')) {
+    d.exec('ALTER TABLE documents ADD COLUMN blind_mode INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!names.has('revealed_at')) {
+    d.exec('ALTER TABLE documents ADD COLUMN revealed_at TEXT');
+  }
 }
 
 function addMissingIdempotencyColumns(): void {
@@ -1015,6 +1025,8 @@ function initDatabase(): void {
       owner_id TEXT,
       owner_secret TEXT,
       owner_secret_hash TEXT,
+      blind_mode INTEGER NOT NULL DEFAULT 0,
+      revealed_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       deleted_at TEXT
@@ -1344,6 +1356,7 @@ export function createDocument(
   title?: string,
   ownerId?: string,
   ownerSecret?: string,
+  blindMode?: boolean,
 ): DocumentRow {
   assertWritesAllowed('createDocument');
   const now = new Date().toISOString();
@@ -1356,9 +1369,9 @@ export function createDocument(
   d.prepare(`
     INSERT INTO documents (
       slug, doc_id, title, markdown, marks, revision, y_state_version, share_state, access_epoch, collab_bootstrap_epoch, active,
-      owner_id, owner_secret, owner_secret_hash, created_at, updated_at, deleted_at
+      owner_id, owner_secret, owner_secret_hash, blind_mode, created_at, updated_at, deleted_at
     )
-    VALUES (?, ?, ?, ?, ?, 1, 0, 'ACTIVE', 0, ?, 1, ?, NULL, ?, ?, ?, NULL)
+    VALUES (?, ?, ?, ?, ?, 1, 0, 'ACTIVE', 0, ?, 1, ?, NULL, ?, ?, ?, ?, NULL)
   `).run(
     slug,
     docId,
@@ -1368,6 +1381,7 @@ export function createDocument(
     collabBootstrapEpoch,
     ownerId || null,
     ownerSecretHash,
+    blindMode ? 1 : 0,
     now,
     now,
   );
@@ -1453,7 +1467,7 @@ export function setDocumentProjectionHealth(
 export function getDocumentAuthStateBySlug(slug: string): DocumentAuthStateRow | undefined {
   return getDb()
     .prepare(`
-      SELECT slug, doc_id, share_state, access_epoch, owner_id, owner_secret, owner_secret_hash
+      SELECT slug, doc_id, share_state, access_epoch, owner_id, owner_secret, owner_secret_hash, blind_mode, revealed_at
       FROM documents
       WHERE slug = ?
       LIMIT 1
@@ -2350,6 +2364,28 @@ export function resolveDocumentAccess(slug: string, presentedSecret: string): Do
 
 export function resolveDocumentAccessRole(slug: string, presentedSecret: string): ShareRole | null {
   return resolveDocumentAccess(slug, presentedSecret)?.role ?? null;
+}
+
+export function setDocumentBlindMode(slug: string, enabled: boolean): boolean {
+  assertWritesAllowed('setDocumentBlindMode');
+  const now = new Date().toISOString();
+  const result = getDb().prepare(`
+    UPDATE documents
+    SET blind_mode = ?, revealed_at = NULL, updated_at = ?
+    WHERE slug = ?
+  `).run(enabled ? 1 : 0, now, slug);
+  return result.changes > 0;
+}
+
+export function revealDocumentComments(slug: string): string | null {
+  assertWritesAllowed('revealDocumentComments');
+  const now = new Date().toISOString();
+  const result = getDb().prepare(`
+    UPDATE documents
+    SET revealed_at = ?, updated_at = ?
+    WHERE slug = ? AND blind_mode = 1 AND revealed_at IS NULL
+  `).run(now, now, slug);
+  return result.changes > 0 ? now : null;
 }
 
 export function bumpDocumentAccessEpoch(slug: string): number | null {

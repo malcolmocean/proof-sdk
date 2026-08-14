@@ -2,8 +2,10 @@ import { Router, type Request, type RequestHandler, type Response } from 'expres
 import {
   bumpDocumentAccessEpoch,
   getDocument,
+  getDocumentAuthStateBySlug,
   resolveDocumentAccessRole,
 } from './db.js';
+import { filterMarksForViewer, isBlindActive } from './blind-mode.js';
 import { executeDocumentOperationAsync } from './document-engine.js';
 import { executeCanonicalRewrite } from './canonical-document.js';
 import {
@@ -124,6 +126,36 @@ function getSlugParam(req: Request): string | null {
   if (typeof raw === 'string' && raw.trim()) return raw;
   if (Array.isArray(raw) && typeof raw[0] === 'string' && raw[0].trim()) return raw[0];
   return null;
+}
+
+/**
+ * Blind review mode: bridge responses that echo the marks map are filtered to
+ * what this caller may see. Identity is the caller's agent id / "by" field;
+ * owner_bot tokens see everything.
+ */
+function applyBlindModeToBridgeBody(
+  req: Request,
+  slug: string,
+  requestBody: Record<string, unknown>,
+  body: unknown,
+): Record<string, unknown> {
+  if (!body || typeof body !== 'object') return body as Record<string, unknown>;
+  const record = body as Record<string, unknown>;
+  if (!record.marks || typeof record.marks !== 'object') return record;
+  const docState = getDocumentAuthStateBySlug(slug);
+  if (!isBlindActive(docState)) return record;
+  const token = getBridgeToken(req);
+  const isOwner = token ? resolveDocumentAccessRole(slug, token) === 'owner_bot' : false;
+  const actorCandidates = [requestBody.__agentId, requestBody.by, req.query.actor];
+  const actor = actorCandidates.find((value) => typeof value === 'string' && value.trim()) as string | undefined;
+  return {
+    ...record,
+    marks: filterMarksForViewer(
+      record.marks as Record<string, { kind?: string; by?: string }>,
+      docState,
+      { actor: actor ?? null, isOwner },
+    ),
+  };
 }
 
 function getBridgeToken(req: Request): string | null {
@@ -656,7 +688,7 @@ bridgeRouter.use(async (req: Request, res: Response) => {
     }
     res.setHeader('x-proof-bridge-execution', 'server');
     res.status(serverResult.status).json({
-      ...serverResult.body,
+      ...applyBlindModeToBridgeBody(req, slug, requestBody, serverResult.body),
       execution: 'server',
     });
     return;
@@ -670,7 +702,7 @@ bridgeRouter.use(async (req: Request, res: Response) => {
       requestBody,
     );
     res.setHeader('x-proof-bridge-execution', 'viewer');
-    res.json(result);
+    res.json(applyBlindModeToBridgeBody(req, slug, requestBody, result));
   } catch (error) {
     const bridgeError = error as BridgeError;
     const code = getErrorCode(bridgeError);

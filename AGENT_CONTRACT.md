@@ -138,6 +138,30 @@ Send `Idempotency-Key` on mutation requests so retries stay safe.
 - Poll: `GET /documents/:slug/events/pending?after=<id>&limit=<n>`
 - Ack: `POST /documents/:slug/events/ack`
 
+## Blind Review Mode
+
+Create a document with `"blindMode": true` to run an independent (blind)
+review: until the owner reveals, each reviewer — human or agent — only sees
+their own comments, suggestions, flags, and approvals. The document owner
+sees everything throughout.
+
+- Identity is the mark's `by` value, matched case-insensitively and ignoring
+  the `human:`/`ai:` prefix. Send a consistent `by` (or `X-Agent-Id`) on
+  writes and reads.
+- Filtered reads: `GET .../state`, `GET .../marks`, `GET /api/documents/:slug`,
+  mutation response echoes, and `events/pending` (other reviewers' comment
+  events are withheld pre-reveal; the cursor still advances).
+- Bulk `PUT /api/documents/:slug` with a `marks` map cannot delete or modify
+  marks hidden from the writer; they are preserved server-side.
+- Reveal: `POST /api/documents/:slug/reveal` (owner secret required). Toggle:
+  `POST /api/documents/:slug/blind-mode` with `{"enabled": true|false}`.
+- State responses include `blindMode` and `revealedAt` so agents can tell
+  which regime they are reading under.
+
+Blind mode is a workflow convention for trusted collaborators, not a
+security boundary: live collab websocket sync still carries the full marks
+map to browser clients, which hide other reviewers' marks at render time.
+
 ## Collab Session Lifecycle
 
 1. Resolve open context and capabilities
