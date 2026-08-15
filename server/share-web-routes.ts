@@ -176,7 +176,7 @@ function buildShareRuntimeConfigScript(slug: string, shareToken?: string | null)
     commentUiDefaultMode ? `window.__PROOF_CONFIG__.commentUiDefaultMode = ${JSON.stringify(commentUiDefaultMode)};` : '',
     blindState?.blind_mode ? `window.__PROOF_CONFIG__.blindMode = true;` : '',
     blindState?.blind_mode ? `window.__PROOF_CONFIG__.blindRevealedAt = ${JSON.stringify(blindState.revealed_at ?? null)};` : '',
-    blindState?.blind_mode ? `window.__PROOF_CONFIG__.blindIsOwner = ${JSON.stringify(blindIsOwner)};` : '',
+    blindIsOwner ? `window.__PROOF_CONFIG__.blindIsOwner = true;` : '',
   ].filter(Boolean);
   if (configLines.length === 0) return '';
   return `<script>

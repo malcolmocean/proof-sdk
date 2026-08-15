@@ -61,13 +61,31 @@ function renderButton(label: string, onClick: () => void): HTMLButtonElement {
 }
 
 export function initBlindReviewBanner(options: BlindReviewBannerOptions): void {
-  const state = getBlindReviewState();
-  if (!state.blindMode) return;
+  // Marks were rendered under the blind-mode rules in effect at page load, so
+  // if the mode flips while the page is open, the safe move is a refresh.
+  const blindModeAtLoad = getBlindReviewState().blindMode;
 
   const render = (): void => {
+    const current = getBlindReviewState();
+
+    if (current.blindMode !== blindModeAtLoad) {
+      const banner = bannerElement();
+      banner.replaceChildren();
+      const message = document.createElement('span');
+      message.textContent = current.blindMode
+        ? 'The owner turned on blind review — refresh to hide other reviewers’ comments.'
+        : 'The owner turned off blind review — refresh to see all comments.';
+      banner.append(message, renderButton('Refresh', () => window.location.reload()));
+      return;
+    }
+
+    if (!current.blindMode) {
+      document.getElementById(BANNER_ID)?.remove();
+      return;
+    }
+
     const banner = bannerElement();
     banner.replaceChildren();
-    const current = getBlindReviewState();
 
     const message = document.createElement('span');
     if (current.revealedAt) {
@@ -111,5 +129,6 @@ export function initBlindReviewBanner(options: BlindReviewBannerOptions): void {
   };
 
   window.addEventListener('proof:blind-review-revealed', render);
+  window.addEventListener('proof:blind-review-changed', render);
   render();
 }

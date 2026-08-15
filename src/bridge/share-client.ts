@@ -5,7 +5,7 @@
 
 import { executeBridgeCall } from './bridge-executor';
 import { buildShareMutationBaseToken } from './share-mutation-base.js';
-import { isBlindHidingActive, setBlindReviewState } from '../shared/blind-review.js';
+import { getBlindReviewState, isBlindHidingActive, setBlindReviewState } from '../shared/blind-review.js';
 
 export interface ShareDocument {
   slug: string;
@@ -561,6 +561,7 @@ export class ShareClient {
         this.rememberObservedMutationBase(payload as Record<string, unknown>);
       }
       if (typeof payload.blindMode === 'boolean') {
+        const prevBlindMode = getBlindReviewState().blindMode;
         const wasHiding = isBlindHidingActive();
         setBlindReviewState({
           blindMode: payload.blindMode,
@@ -568,6 +569,8 @@ export class ShareClient {
         });
         if (wasHiding && !isBlindHidingActive()) {
           window.dispatchEvent(new CustomEvent('proof:blind-review-revealed'));
+        } else if (prevBlindMode !== payload.blindMode) {
+          window.dispatchEvent(new CustomEvent('proof:blind-review-changed'));
         }
       }
       return payload;

@@ -1140,13 +1140,11 @@ class ProofEditorImpl implements ProofEditor {
       };
     }).__PROOF_CONFIG__ ?? {};
 
-    if (proofConfig.blindMode) {
-      setBlindReviewState({
-        blindMode: true,
-        revealedAt: proofConfig.blindRevealedAt ?? null,
-        isOwner: proofConfig.blindIsOwner === true,
-      });
-    }
+    setBlindReviewState({
+      blindMode: proofConfig.blindMode === true,
+      revealedAt: proofConfig.blindRevealedAt ?? null,
+      isOwner: proofConfig.blindIsOwner === true,
+    });
 
     if (!proofConfig.windowId) {
       proofConfig.windowId = `web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1288,12 +1286,12 @@ class ProofEditorImpl implements ProofEditor {
       initThemePicker();
     }
 
-    if (getBlindReviewState().blindMode) {
-      initBlindReviewBanner({
-        getSlug: () => shareClient.getSlug(),
-        getAuthHeaders: () => shareClient.getShareAuthHeaders(),
-      });
-    }
+    // Always init: the banner renders nothing on non-blind docs but needs to
+    // react if blind mode is toggled on while the page is open.
+    initBlindReviewBanner({
+      getSlug: () => shareClient.getSlug(),
+      getAuthHeaders: () => shareClient.getShareAuthHeaders(),
+    });
 
     // If in CLI mode, load the file from the API
     if (this.isCliMode) {
@@ -4063,6 +4061,29 @@ class ProofEditorImpl implements ProofEditor {
     }
   }
 
+  private async toggleBlindReview(enabled: boolean): Promise<void> {
+    const slug = shareClient.getSlug();
+    if (!slug) return;
+    try {
+      const response = await fetch(`/api/documents/${slug}/blind-mode`, {
+        method: 'POST',
+        headers: {
+          ...shareClient.getShareAuthHeaders(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        console.error('[blind-review] toggle failed', response.status, body);
+        return;
+      }
+      window.location.reload();
+    } catch (error) {
+      console.error('[blind-review] toggle request failed', error);
+    }
+  }
+
   private createShareMenuButton(): HTMLElement {
     const container = document.createElement('div');
     container.className = 'share-pill-share-btn';
@@ -4189,6 +4210,16 @@ class ProofEditorImpl implements ProofEditor {
       addItem('Copy link', async () => this.copyLinkWithFallback(this.getCanonicalShareUrl()));
       addDivider();
       addActionItem('View activity', () => this.openShareActivityModal());
+
+      const blindState = getBlindReviewState();
+      if (blindState.isOwner) {
+        addDivider();
+        addActionItem(
+          blindState.blindMode ? 'Turn off blind review' : 'Turn on blind review',
+          () => { void this.toggleBlindReview(!blindState.blindMode); },
+          { subtle: true },
+        );
+      }
 
       container.appendChild(menu);
       this.clampMenuToViewport(menu);
