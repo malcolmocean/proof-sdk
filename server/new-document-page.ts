@@ -156,9 +156,20 @@ const NEW_DOCUMENT_HTML = String.raw`<!doctype html>
               return;
             }
             // The owner secret (not the editor access token) is what unlocks the
-            // reveal switch, and /d/:slug persists a query token to a cookie.
-            window.location.href = '/d/' + encodeURIComponent(result.body.slug)
-              + '?token=' + encodeURIComponent(result.body.ownerSecret);
+            // reveal switch. Loading the tokenized URL once persists it to an
+            // httpOnly cookie, which grants owner access on its own — so land the
+            // creator on the clean URL. Otherwise "Copy link" in the doc would
+            // hand the owner secret to every reviewer.
+            var docPath = '/d/' + encodeURIComponent(result.body.slug);
+            var tokenizedPath = docPath + '?token=' + encodeURIComponent(result.body.ownerSecret);
+            fetch(tokenizedPath, { credentials: 'same-origin' })
+              .then(function (primed) {
+                window.location.href = primed.ok ? docPath : tokenizedPath;
+              })
+              .catch(function () {
+                // Cookie priming failed; degraded owner access beats none.
+                window.location.href = tokenizedPath;
+              });
           })
           .catch(function (error) {
             showError('Could not create the document: ' + error);
