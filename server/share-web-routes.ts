@@ -166,10 +166,19 @@ function buildLiveViewerLeaseConnectionId(
   return `share-live:${slug}:${accessEpoch}:${role}:${digest}`;
 }
 
-function buildShareRuntimeConfigScript(slug: string, shareToken?: string | null): string {
+function buildShareRuntimeConfigScript(
+  slug: string,
+  shareToken?: string | null,
+  // Owner access resolved from any token source. The token itself is only handed
+  // to the client when it came from the URL, but an owner who is authenticated by
+  // the share cookie still needs the reveal / blind-mode controls, which key off
+  // this flag alone. Their requests carry the same cookie, so the server re-checks.
+  ownerAuthorized?: boolean,
+): string {
   const commentUiDefaultMode = normalizeCommentUiMode(process.env.PROOF_COMMENT_UI_DEFAULT_MODE);
   const blindState = getDocumentAuthStateBySlug(slug);
-  const blindIsOwner = Boolean(blindState && shareToken && canMutateByOwnerIdentity(blindState, shareToken));
+  const blindIsOwner = ownerAuthorized
+    ?? Boolean(blindState && shareToken && canMutateByOwnerIdentity(blindState, shareToken));
   const configLines = [
     shareToken ? `window.__PROOF_CONFIG__.shareSlug = ${JSON.stringify(slug)};` : '',
     shareToken ? `window.__PROOF_CONFIG__.shareToken = ${JSON.stringify(shareToken)};` : '',
@@ -191,6 +200,7 @@ function injectShareHtmlDiscoveryTags(
   markdown: string,
   preview: SharePreviewModel,
   shareToken?: string | null,
+  ownerAuthorized?: boolean,
 ): string {
   const proofSdkPaths = buildProofSdkDocumentPaths(slug);
   const agentApi = proofSdkPaths.state;
@@ -204,7 +214,7 @@ function injectShareHtmlDiscoveryTags(
     `<meta name="agent-api" content="${escapeHtml(agentApi)}">`,
     '<meta name="agent-docs" content="/agent-docs">',
   ].join('\n');
-  const configScript = buildShareRuntimeConfigScript(slug, shareToken);
+  const configScript = buildShareRuntimeConfigScript(slug, shareToken, ownerAuthorized);
 
   const instructionMarkup = `<h2>Proof Shared Document</h2>
   <p>This is a collaborative document on Proof. To read or edit it programmatically:</p>
@@ -646,6 +656,9 @@ shareWebRoutes.get('/d/:slug', (req: Request, res: Response) => {
   // Option 2: The SPA HTML includes a hidden <div id="agent-instructions"> with
   // API discovery info, visible in raw markup for readability extractors.
   const configShareToken = tokenSource === 'query:token' ? token : null;
+  // Owner controls follow the access, not the URL: a creator whose owner secret
+  // lives in the share cookie gets them without carrying the secret in the link.
+  const ownerAuthorized = queryOwner || cookieOwner;
   const preview = buildSharePreviewModel({
     slug,
     origin,
@@ -658,5 +671,5 @@ shareWebRoutes.get('/d/:slug', (req: Request, res: Response) => {
     } : null,
     shareState: doc?.share_state ?? 'MISSING',
   });
-  res.type('html').send(injectShareHtmlDiscoveryTags(shareHtml ?? '', slug, doc?.markdown ?? '', preview, configShareToken));
+  res.type('html').send(injectShareHtmlDiscoveryTags(shareHtml ?? '', slug, doc?.markdown ?? '', preview, configShareToken, ownerAuthorized));
 });
