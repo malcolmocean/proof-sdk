@@ -10,6 +10,7 @@ import { createBridgeMountRouter } from './bridge.js';
 import { getCollabRuntime, startCollabRuntimeEmbedded } from './collab.js';
 import { discoveryRoutes } from './discovery-routes.js';
 import { shareWebRoutes } from './share-web-routes.js';
+import { newDocumentRoutes } from './new-document-page.js';
 import {
   capabilitiesPayload,
   enforceApiClientCompatibility,
@@ -94,13 +95,15 @@ async function main(): Promise<void> {
       p { font-size: 1.05rem; line-height: 1.6; }
       code { background: #eaf2e6; padding: 0.2rem 0.35rem; border-radius: 4px; }
       a { color: #266854; }
+      a.cta { display: inline-block; margin: 1rem 0 1.5rem; padding: 0.7rem 1.6rem; border-radius: 999px; background: #17261d; color: #fff; font-weight: 600; text-decoration: none; }
     </style>
   </head>
   <body>
     <main>
       <h1>Proof SDK</h1>
       <p>Open-source collaborative markdown editing with provenance tracking and an agent HTTP bridge.</p>
-      <p>Start with <code>POST /documents</code>, inspect <a href="/agent-docs">agent docs</a>, or read <a href="/.well-known/agent.json">discovery metadata</a>.</p>
+      <p><a class="cta" href="/new">New document</a></p>
+      <p>Or start with <code>POST /documents</code>, inspect <a href="/agent-docs">agent docs</a>, or read <a href="/.well-known/agent.json">discovery metadata</a>.</p>
     </main>
   </body>
 </html>`);
@@ -119,6 +122,7 @@ async function main(): Promise<void> {
     res.json(capabilitiesPayload());
   });
 
+  app.use(newDocumentRoutes);
   app.use(discoveryRoutes);
   app.use('/api', enforceApiClientCompatibility, apiRoutes);
   app.use('/api/agent', agentRoutes);
